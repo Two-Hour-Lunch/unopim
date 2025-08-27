@@ -1,8 +1,21 @@
-[phases.setup]
-# Supervisor to run multiple processes
-nixPkgs = ["python311Packages.supervisor"]
+# Install system packages with apt so composer exists during build
+[packages]
+apt = [
+  "nginx",
+  "supervisor",
+  "composer",
+  "php-cli",
+  "php-fpm",
+  "php-mbstring",
+  "php-xml",
+  "php-curl",
+  "php-zip",
+  "php-mysql",
+  "php-redis"
+]
 
 [phases.install]
+# Composer must run during build
 cmds = [
   "composer install --no-interaction --prefer-dist --optimize-autoloader",
   "php -r \"file_exists('.env') || copy('.env.example', '.env');\"",
@@ -10,44 +23,43 @@ cmds = [
   "chmod -R ug+rwX storage bootstrap/cache || true"
 ]
 
+# If you later need front-end assets, uncomment these two lines:
+# [phases.build]
+# cmds = ["npm ci", "npm run build"]
+
 [start]
 cmd = "bash /assets/start.sh"
 
 [variables]
-# Coolify provides PORT, we still set a default
 PORT = "80"
 
 [staticAssets]
-# Launch script
 "start.sh" = '''
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Allow APP_KEY generation if missing
-if [ -z "${APP_KEY:-}" ] || [ "$APP_KEY" = "" ] || [[ "$APP_KEY" == base64:* ]]; then
-  # Only generate if not already set correctly
+# Only generate APP_KEY if missing
+if [ -z "${APP_KEY:-}" ] || [ "$APP_KEY" = "" ]; then
   php artisan key:generate --force || true
 fi
 
-# Ensure Laravel is ready
+# Clear and warm caches, run migrations
 php artisan config:clear || true
 php artisan cache:clear || true
 php artisan route:clear || true
 php artisan view:clear || true
 php artisan migrate --force || true
 
-# Run UnoPIM installer once. It is safe to no-op on later boots.
+# UnoPIM installer is safe to re-run, it will no-op if already done
 php artisan unopim:install --no-interaction || true
 
-# Write Supervisor config files into place
+# Supervisor programs
 mkdir -p /etc/supervisor/conf.d
 cp /assets/supervisord.d/*.conf /etc/supervisor/conf.d/
 
-# Start Supervisor, which starts nginx, php-fpm, and the queue worker
 exec supervisord -c /assets/supervisord.conf -n
 '''
 
-# Supervisor root config
 "supervisord.conf" = '''
 [supervisord]
 nodaemon=true
@@ -59,7 +71,6 @@ childlogdir=/tmp
 files = /etc/supervisor/conf.d/*.conf
 '''
 
-# Program configs
 "supervisord.d/web-nginx.conf" = '''
 [program:web-nginx]
 command=nginx -c /assets/nginx.conf
@@ -93,7 +104,6 @@ stdout_logfile=/dev/stdout
 stderr_logfile=/dev/stderr
 '''
 
-# Minimal PHP-FPM pool
 "php-fpm.conf" = '''
 [global]
 error_log = /dev/stderr
@@ -114,7 +124,7 @@ php_admin_value[error_log] = /dev/stderr
 php_admin_flag[log_errors] = on
 '''
 
-# Single, conflict-free Nginx server block
+# Single server block prevents any duplicate "location /"
 "nginx.conf" = '''
 user www-data;
 daemon off;
