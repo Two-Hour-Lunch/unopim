@@ -1,0 +1,155 @@
+[phases.setup]
+# Supervisor to run multiple processes
+nixPkgs = ["python311Packages.supervisor"]
+
+[phases.install]
+cmds = [
+  "composer install --no-interaction --prefer-dist --optimize-autoloader",
+  "php -r \"file_exists('.env') || copy('.env.example', '.env');\"",
+  "php artisan storage:link || true",
+  "chmod -R ug+rwX storage bootstrap/cache || true"
+]
+
+[start]
+cmd = "bash /assets/start.sh"
+
+[variables]
+# Coolify provides PORT, we still set a default
+PORT = "80"
+
+[staticAssets]
+# Launch script
+"start.sh" = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Allow APP_KEY generation if missing
+if [ -z "${APP_KEY:-}" ] || [ "$APP_KEY" = "" ] || [[ "$APP_KEY" == base64:* ]]; then
+  # Only generate if not already set correctly
+  php artisan key:generate --force || true
+fi
+
+# Ensure Laravel is ready
+php artisan config:clear || true
+php artisan cache:clear || true
+php artisan route:clear || true
+php artisan view:clear || true
+php artisan migrate --force || true
+
+# Run UnoPIM installer once. It is safe to no-op on later boots.
+php artisan unopim:install --no-interaction || true
+
+# Write Supervisor config files into place
+mkdir -p /etc/supervisor/conf.d
+cp /assets/supervisord.d/*.conf /etc/supervisor/conf.d/
+
+# Start Supervisor, which starts nginx, php-fpm, and the queue worker
+exec supervisord -c /assets/supervisord.conf -n
+'''
+
+# Supervisor root config
+"supervisord.conf" = '''
+[supervisord]
+nodaemon=true
+logfile=/tmp/supervisord.log
+pidfile=/tmp/supervisord.pid
+childlogdir=/tmp
+
+[include]
+files = /etc/supervisor/conf.d/*.conf
+'''
+
+# Program configs
+"supervisord.d/web-nginx.conf" = '''
+[program:web-nginx]
+command=nginx -c /assets/nginx.conf
+autostart=true
+autorestart=true
+priority=10
+stdout_logfile=/dev/stdout
+stderr_logfile=/dev/stderr
+'''
+
+"supervisord.d/php-fpm.conf" = '''
+[program:php-fpm]
+command=php-fpm -y /assets/php-fpm.conf -F
+autostart=true
+autorestart=true
+priority=20
+stdout_logfile=/dev/stdout
+stderr_logfile=/dev/stderr
+'''
+
+"supervisord.d/queue-worker.conf" = '''
+[program:queue-worker]
+command=php artisan queue:work --sleep=3 --tries=3 --max-time=3600
+autostart=true
+autorestart=true
+startsecs=5
+stopasgroup=true
+killasgroup=true
+priority=30
+stdout_logfile=/dev/stdout
+stderr_logfile=/dev/stderr
+'''
+
+# Minimal PHP-FPM pool
+"php-fpm.conf" = '''
+[global]
+error_log = /dev/stderr
+
+[www]
+listen = 127.0.0.1:9000
+listen.allowed_clients = 127.0.0.1
+user = www-data
+group = www-data
+pm = dynamic
+pm.max_children = 10
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 5
+clear_env = no
+catch_workers_output = yes
+php_admin_value[error_log] = /dev/stderr
+php_admin_flag[log_errors] = on
+'''
+
+# Single, conflict-free Nginx server block
+"nginx.conf" = '''
+user www-data;
+daemon off;
+worker_processes auto;
+
+events { worker_connections 1024; }
+
+http {
+  include       mime.types;
+  default_type  application/octet-stream;
+  sendfile      on;
+  server_tokens off;
+
+  server {
+    listen ${PORT};
+    server_name _;
+
+    root /app/public;
+    index index.php;
+
+    location / {
+      try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+      fastcgi_pass   127.0.0.1:9000;
+      fastcgi_index  index.php;
+      include        fastcgi_params;
+      fastcgi_param  SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+      fastcgi_param  DOCUMENT_ROOT  $realpath_root;
+    }
+
+    location ~ /\. {
+      deny all;
+    }
+  }
+}
+'''
