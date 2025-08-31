@@ -2,6 +2,7 @@
 nixPkgs = ["...", "python311Packages.supervisor"]
 
 [phases.build]
+
 cmds = [
   "mkdir -p /etc/supervisor/conf.d/",
   "cp /assets/worker-*.conf /etc/supervisor/conf.d/",
@@ -9,6 +10,10 @@ cmds = [
   "chmod +x /assets/start.sh",
   "composer install --optimize-autoloader --no-dev",
   "npm install && npm run build",
+
+  # run the patch to force https inside RouteServiceProvider
+  "bash /assets/patch_https.sh",
+  
   "php artisan config:clear",
   "php artisan route:clear",
   "php artisan view:clear"
@@ -18,6 +23,50 @@ cmds = [
 cmd = '/assets/start.sh'
 
 [staticAssets]
+"patch_https.sh" = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+FILE="app/Providers/RouteServiceProvider.php"
+
+# 1) Ensure the URL facade import exists
+if ! grep -q 'use Illuminate\\Support\\Facades\\URL;' "$FILE"; then
+  # insert after the namespace line
+  sed -i '0,/^namespace App\\Providers;$/s//namespace App\\Providers;\n\nuse Illuminate\\Support\\Facades\\URL;/' "$FILE"
+fi
+
+# 2) Ensure a boot() exists that forces https in production
+if ! grep -q 'function boot(' "$FILE"; then
+  # inject a boot() method right after the class line
+  awk '
+    /class RouteServiceProvider extends ServiceProvider/ {
+      print;
+      print "";
+      print "    public function boot(): void";
+      print "    {";
+      print "        if (app()->environment(\"production\")) {";
+      print "            URL::forceScheme(\"https\");";
+      print "            if (config(\"app.url\")) {";
+      print "                URL::forceRootUrl(config(\"app.url\"));";
+      print "            }";
+      print "        }";
+      print "    }";
+      next
+    }
+    { print }
+  ' "$FILE" > /tmp/RouteServiceProvider.php && mv /tmp/RouteServiceProvider.php "$FILE"
+else
+  # boot() exists: make sure it contains URL::forceScheme('https')
+  if ! grep -q "URL::forceScheme('https')" "$FILE" && ! grep -q 'URL::forceScheme("https")' "$FILE"; then
+    # add the call at the top of boot()
+    sed -i "/function boot(.*)/,/{/ s/{/&\n        if (app()->environment('production')) { URL::forceScheme('https'); if (config('app.url')) { URL::forceRootUrl(config('app.url')); } }/" "$FILE"
+  fi
+fi
+'''
+
+
+
+
 "start.sh" = '''
 #!/bin/bash
 # Run Laravel setup commands
