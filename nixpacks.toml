@@ -222,19 +222,24 @@ http {
         location = /robots.txt { access_log off; log_not_found off; }
 
         error_page 404 /index.php;
-
+        
         location ~ \.php$ {
             fastcgi_pass 127.0.0.1:9000;
-            fastcgi_buffer_size 8k;
-            fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+            fastcgi_index index.php;
             include $!{nginx}/conf/fastcgi_params;
             include $!{nginx}/conf/fastcgi.conf;
 
-            # New: forward scheme and host, and set HTTPS flag + port for PHP
+            fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+            fastcgi_param DOCUMENT_ROOT  $realpath_root;
+
+            # Make PHP think every request is HTTPS
+            fastcgi_param HTTPS on;
+            fastcgi_param SERVER_PORT 443;
+
+            # Still forward proxy hints if present (harmless if missing)
             fastcgi_param HTTP_X_FORWARDED_PROTO $http_x_forwarded_proto;
             fastcgi_param HTTP_X_FORWARDED_HOST  $http_host;
-            fastcgi_param HTTPS                  $fastcgi_https;
-            fastcgi_param SERVER_PORT            443;
+            fastcgi_param HTTP_CF_VISITOR        $http_cf_visitor;
         }
 
         location ~ /\.(?!well-known).* {
